@@ -1,0 +1,80 @@
+---
+- name: Deploy CDI (Containerized Data Importer)
+  hosts: microshift-host
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Get latest CDI version from GitHub API
+      ansible.builtin.uri:
+        url: https://github.com/kubevirt/containerized-data-importer/releases/latest
+        return_content: true
+      register: cdi_api_response
+
+    - name: Set CDI latest version variable
+      ansible.builtin.set_fact:
+        cdi_version: "{{ cdi_api_response.url | basename }}"
+
+    - name: Display detected latest CDI version
+      ansible.builtin.debug:
+        msg: "Detected latest CDI version: {{ cdi_version }}"
+
+    - name: Pre-pull CDI Operator image
+      containers.podman.podman_image:
+        name: quay.io/kubevirt/cdi-operator
+        tag: "{{ cdi_version }}"
+        state: present
+      register: cdi_pull
+      until: cdi_pull is not failed
+      retries: 10
+      delay: 60
+
+    - name: Deploy CDI Operator
+      ansible.builtin.command:
+        cmd: "oc apply -f https://github.com/kubevirt/containerized-data-importer/releases/download/{{ cdi_version }}/cdi-operator.yaml"
+      become: true
+      become_user: "{{ microshift_admin }}"
+      register: result_cdi_operator
+      changed_when: "'unchanged' not in result_cdi_operator.stdout"
+
+    - name: Deploy CDI Custom Resource
+      ansible.builtin.command:
+        cmd: "oc apply -f https://github.com/kubevirt/containerized-data-importer/releases/download/{{ cdi_version }}/cdi-cr.yaml"
+      become: true
+      become_user: "{{ microshift_admin }}"
+      register: result_cdi_cr
+      changed_when: "'unchanged' not in result_cdi_cr.stdout"
+
+    - name: Wait for CDI to be Available
+      ansible.builtin.command:
+        cmd: "oc wait cdi cdi --for=condition=Available --timeout=1200s"
+      become: true
+      become_user: "{{ microshift_admin }}"
+      changed_when: false
+
+    - name: Patch CDI to Honor Wait For First Consumer
+      ansible.builtin.shell: |
+        set -o pipefail
+        oc patch cdi cdi --type merge -p '{"spec":{"config":{"featureGates":["HonorWaitForFirstConsumer"]}}}'
+      become: true
+      become_user: "{{ microshift_admin }}"
+      changed_when: true
+
+    - name: Ensure CDI Service Accounts have Cluster Admin
+      ansible.builtin.shell: |
+        set -o pipefail
+        oc adm policy add-cluster-role-to-user cluster-admin "system:serviceaccount:cdi:{{ item }}"
+      loop:
+        - cdi-sa
+        - cdi-controller
+      become: true
+      become_user: "{{ microshift_admin }}"
+      register: result_policy_grant
+      changed_when: false
+
+    - name: Force Restart CDI Controller to Pick Up Permissions
+      ansible.builtin.command:
+        cmd: "oc delete pod -n cdi -l cdi.kubevirt.io=cdi-deployment"
+      become: true
+      become_user: "{{ microshift_admin }}"
+      changed_when: true
+

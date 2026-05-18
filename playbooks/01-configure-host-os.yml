@@ -1,0 +1,15 @@
+---
+- name: Prepare CentOS Stream Host
+  hosts: microshift-host
+  become: true
+  tasks:
+    - name: Set a hostname
+      ansible.builtin.hostname:
+        name: "{{ microshift_hostname }}"
+    - name: Ensure required system tools are present
+      ansible.builtin.dnf:
+        name:
+          - podman
+          - lvm2
+        state: present
+

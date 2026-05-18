@@ -1,0 +1,69 @@
+---
+- name: Configure Host Storage
+  hosts: microshift-host
+  become: true
+  tasks:
+
+    - name: Run lsblk
+      ansible.builtin.command: lsblk
+      register: result_lsblk
+      changed_when: false
+
+    - name: Display lsblk
+      ansible.builtin.debug:
+        msg: "{{ result_lsblk.stdout_lines }}"
+
+    - name: Read device information
+      community.general.parted:
+        device: /dev/vda
+        unit: MiB
+      register: vda_info
+
+    - name: Create new partition vda4
+      community.general.parted:
+        device: /dev/vda
+        label: gpt
+        flags: [lvm]
+        number: 4
+        part_start: "{{ vda_info.partitions[2].end | int }}MiB"
+        part_end: "100%"
+        unit: MiB
+        state: present
+      register: result_microshift_partition
+
+    - name: Create MicroShift system Volume Group
+      community.general.lvg:
+        vg: "{{ microshift_storage.vg_name }}"
+        pvs: /dev/vda4
+
+    - name: Create Infra Thin Pool (Auth, VPN, UI)
+      community.general.lvol:
+        vg: "{{ microshift_storage.vg_name }}"
+        thinpool: "{{ microshift_storage.infra_pool.name }}"
+        size: "{{ microshift_storage.infra_pool.size }}"
+        opts: "--poolmetadatasize 512M"
+
+    - name: Create VDI Thin Pool
+      community.general.lvol:
+        vg: "{{ microshift_storage.vg_name }}"
+        thinpool: "{{ microshift_storage.vdi_pool.name }}"
+        size: "{{ microshift_storage.vdi_pool.size }}"
+        opts: "--poolmetadatasize 1024M"
+
+    - name: Ensure /var has enough space for MicroShift
+      community.general.lvol:
+        vg: "{{ microshift_storage.vg_name }}"
+        lv: "var"
+        size: "20G"
+        resizefs: true
+      register: var_resize
+
+    - name: Verify Final Storage Layout
+      ansible.builtin.command: vgs
+      register: vgs_output
+      changed_when: false
+
+    - name: Print Storage Summary
+      ansible.builtin.debug:
+        msg: "VG {{ microshift_storage.vg_name }} now has {{ vgs_output.stdout_lines[-1].split()[6] }} free space remaining."
+

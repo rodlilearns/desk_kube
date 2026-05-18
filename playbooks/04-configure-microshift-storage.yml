@@ -1,0 +1,84 @@
+---
+- name: Configure Microshift Storage
+  hosts: microshift-host
+  become: true
+  tasks:
+
+    - name: Deploy LVMS Configuration
+      ansible.builtin.template:
+        src: "{{ (playbook_dir + '/../templates/topolvm-lvmd.yaml.j2') | realpath }}"
+        dest: /etc/microshift/lvmd.yaml
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Sync LVMD ConfigMap
+      ansible.builtin.shell: |
+        set -o pipefail
+        oc create configmap topolvm-lvmd-0 \
+        --from-file=/etc/microshift/lvmd.yaml \
+        -n topolvm-system \
+        --dry-run=client -o yaml | oc apply -f -
+      register: cm_sync
+      changed_when: "'configured' in cm_sync.stdout or 'created' in cm_sync.stdout"
+
+    - name: Restart TopoLVM LVMD Pod if config changed
+      ansible.builtin.command:
+        cmd: "oc delete pod -n topolvm-system -l app.kubernetes.io/name=topolvm-lvmd"
+      when: cm_sync.changed
+
+    - name: Deploy infra storage StorageClass manifest
+      ansible.builtin.template:
+        src: "{{ (playbook_dir + '/../templates/infra-storage-sc.yaml.j2') | realpath }}"
+        dest: "/home/{{ microshift_admin  }}/infra-storage-sc.yaml"
+        owner: "{{ microshift_admin  }}"
+        group: "{{ microshift_admin  }}"
+        mode: '0644'
+
+    - name: Deploy vdi storage StorageClass manifest
+      ansible.builtin.template:
+        src: "{{ (playbook_dir + '/../templates/vdi-storage-sc.yaml.j2') | realpath }}"
+        dest: "/home/{{ microshift_admin  }}/vdi-storage-sc.yaml"
+        owner: "{{ microshift_admin  }}"
+        group: "{{ microshift_admin  }}"
+        mode: '0644'
+
+    - name: Apply infra and vdi StorageClass
+      ansible.builtin.command:
+        cmd: "oc apply -f /home/{{ microshift_admin  }}/{{ item }}"
+      loop:
+        - infra-storage-sc.yaml
+        - vdi-storage-sc.yaml
+      register: oc_apply_sc
+      until: oc_apply_sc.rc == 0
+      retries: 10
+      delay: 5
+
+    - name: Verify infra-storage StorageClass is created
+      ansible.builtin.command:
+        cmd: "oc get sc infra-storage"
+      become: true
+      become_user: "{{ microshift_admin  }}"
+      register: sc_check
+      until: "'infra-storage' in sc_check.stdout"
+      retries: 10
+      delay: 5
+      changed_when: false
+
+    - name: "Verify vdi-storage StorageClass is created (as {{ microshift_admin  }})"
+      ansible.builtin.command:
+        cmd: "oc get sc vdi-storage"
+      become: true
+      become_user: "{{ microshift_admin  }}"
+      register: sc_check
+      until: "'vdi-storage' in sc_check.stdout"
+      retries: 15
+      delay: 10
+      changed_when: false
+
+  handlers:
+    - name: Restart MicroShift
+      ansible.builtin.systemd:
+        name: microshift
+        state: restarted
+

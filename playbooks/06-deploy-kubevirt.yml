@@ -1,0 +1,77 @@
+---
+- name: Deploy KubeVirt
+  hosts: microshift-host
+  gather_facts: false
+  become: true
+  tasks:
+
+    - name: Get latest KubeVirt version from GitHub API
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/kubevirt/kubevirt/releases/latest
+        return_content: true
+      register: kubevirt_api_response
+
+    - name: Set KubeVirt latest version variable
+      ansible.builtin.set_fact:
+        kubevirt_version: "{{ kubevirt_api_response.json.tag_name }}"
+
+    - name: Display detected latest KubeVirt version
+      ansible.builtin.debug:
+        msg: "Detected latest KubeVirt version: {{ kubevirt_version }}"
+
+    - name: Pre-pull KubeVirt Operator via Podman module
+      containers.podman.podman_image:
+        name: "quay.io/kubevirt/virt-operator:{{ kubevirt_version }}"
+        state: present
+      register: podman_pull
+      until: podman_pull is not failed
+      retries: 10
+      delay: 30
+
+    - name: Deploy KubeVirt Operator
+      ansible.builtin.command:
+        cmd: "oc apply -f https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-operator.yaml"
+      become: true
+      become_user: "{{ microshift_admin }}"
+      register: result_kubevirt_operator
+      changed_when:
+        - "'unchanged' not in result_kubevirt_operator.stdout"
+
+    - name: Deploy KubeVirt Custom Resource
+      ansible.builtin.command:
+        cmd: "oc apply -f https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/kubevirt-cr.yaml"
+      become: true
+      become_user: "{{ microshift_admin }}"
+      register: result_kubevirt_cr
+      changed_when:
+        - "'unchanged' not in result_kubevirt_cr.stdout"
+
+    - name: Wait for KubeVirt Operator to be Running
+      ansible.builtin.command:
+        cmd: "oc get pods -n kubevirt -l kubevirt.io=virt-operator -o jsonpath='{.items[0].status.phase}'"
+      become: true
+      become_user: "{{ microshift_admin }}"
+      register: operator_pod_status
+      until: "'Running' in operator_pod_status.stdout"
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Wait for KubeVirt CR to enter Deployed phase
+      ansible.builtin.command:
+        # We use a more robust jsonpath that handles 'null' better
+        cmd: "oc get kubevirt -n kubevirt kubevirt -o jsonpath='{.status.phase}'"
+      become: true
+      become_user: "{{ microshift_admin }}"
+      register: kubevirt_phase
+      # This will now wait through the 'blank' period until it hits 'Deployed'
+      until: "'Deployed' in  kubevirt_phase.stdout"
+      retries: 60
+      delay: 10
+      changed_when: false
+
+    - name: Install latest virtctl binary
+      ansible.builtin.get_url:
+        url: "https://github.com/kubevirt/kubevirt/releases/download/{{ kubevirt_version }}/virtctl-{{ kubevirt_version }}-linux-amd64"
+        dest: /usr/local/bin/virtctl
+        mode: '0755'

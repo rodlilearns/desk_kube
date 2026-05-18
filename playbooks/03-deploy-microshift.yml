@@ -1,0 +1,87 @@
+---
+- name: Bootstrap Microshift
+  hosts: microshift-host
+  become: true
+  tasks:
+    - name: Install Microshift
+      block:
+        - name: Check if MicroShift is already installed
+          ansible.builtin.command: which microshift
+          register: microshift_check
+          failed_when: false
+          changed_when: false
+
+        - name: Download MicroShift QuickRPM script 
+          ansible.builtin.get_url:
+            url: https://microshift-io.github.io/microshift/quickrpm.sh
+            dest: /tmp/quickrpm.sh
+            mode: '0700'
+          when: microshift_check.rc != 0
+
+        - name: Run MicroShift QuickRPM script
+          ansible.builtin.command: /tmp/quickrpm.sh
+          when: microshift_check.rc != 0
+          register: script_output
+
+        - name: Cleanup temporary script
+          ansible.builtin.file:
+            path: /tmp/quickrpm.sh
+            state: absent
+
+    - name: Configure Microshift
+      block:
+        - name: Create MicroShift Configuration Directory
+          ansible.builtin.file:
+            path: /etc/microshift
+            state: directory
+            mode: '0755'
+
+        - name: Enable and Start MicroShift
+          ansible.builtin.systemd:
+            name: microshift
+            state: started
+            enabled: true
+
+    - name: Setup Client Tooling and Access for Admin User
+      block:
+        - name: Install OpenShift Client (oc) binary
+          ansible.builtin.unarchive:
+            src: https://mirror.openshift.com/pub/openshift-v5/x86_64/clients/ocp/stable/openshift-client-linux.tar.gz
+            dest: /usr/local/bin
+            remote_src: true
+            mode: '0755'
+            creates: /usr/local/bin/oc
+
+        - name: Wait for Kubeconfig generation
+          ansible.builtin.wait_for:
+            path: /var/lib/microshift/resources/kubeadmin/kubeconfig
+            timeout: 300
+
+        - name: "Set up .kube directory for {{ microshift_admin }}"
+          ansible.builtin.file:
+            path: "/home/{{ microshift_admin }}/.kube"
+            state: directory
+            owner: "{{ microshift_admin }}"
+            group: "{{ microshift_admin }}"
+            mode: '0750'
+
+        - name: "Copy Admin Kubeconfig to {{ microshift_admin }}"
+          ansible.builtin.copy:
+            src: /var/lib/microshift/resources/kubeadmin/kubeconfig
+            dest: "/home/{{ microshift_admin }}/.kube/config"
+            remote_src: true
+            owner: "{{ microshift_admin }}"
+            group: "{{ microshift_admin }}"
+            mode: '0600'
+
+        - name: "Wait for MicroShift API and Node status (as {{ microshift_admin }})"
+          ansible.builtin.command:
+            cmd: "oc get nodes"
+          become: true
+          become_user: "{{ microshift_admin }}"
+          register: node_check
+          until: node_check.rc == 0
+          retries: 30
+          delay: 10
+          changed_when: false
+
